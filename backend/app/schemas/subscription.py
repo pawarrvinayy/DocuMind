@@ -10,3 +10,15 @@ class SubscriptionOut(BaseModel):
     status: str
 
     model_config = {"from_attributes": True}
+
+
+class UsageBucket(BaseModel):
+    used: int
+    limit: int | None  # None = unlimited (Pro plan)
+
+
+class UsageOut(BaseModel):
+    plan: str
+    period: str          # "YYYY-MM"
+    documents: UsageBucket
+    queries: UsageBucket

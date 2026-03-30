@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies import get_current_user_id, get_db
 from app.models.document import Document
 from app.schemas.document import DocumentOut
+from app.services.limits import check_document_limit
 from app.services.pdf_processor import process_pdf
 
 router = APIRouter()
@@ -27,6 +28,8 @@ async def upload_document(
 ):
     if not _is_pdf(file):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    await check_document_limit(user_id, db)
 
     contents = await file.read()
 

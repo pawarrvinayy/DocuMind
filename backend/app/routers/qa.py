@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.dependencies import get_current_user_id, get_db
 from app.models.document import Document
+from app.services.limits import check_query_limit, increment_query_count
 from app.services.llm import stream_answer
 
 router = APIRouter()
@@ -25,6 +26,10 @@ async def ask(
         doc = await db.get(Document, body.document_id)
         if not doc or doc.owner_id != user_id:
             raise HTTPException(status_code=404, detail="Document not found")
+
+    # Enforce quota and record usage before streaming begins
+    await check_query_limit(user_id, db)
+    await increment_query_count(user_id, db)
 
     return StreamingResponse(
         stream_answer(
