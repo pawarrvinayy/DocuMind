@@ -2,17 +2,37 @@ import io
 import os
 
 import tiktoken
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.document import Document, DocumentChunk
 from app.services.embeddings import embed_texts
 
-CHUNK_TOKEN_SIZE = 512
+CHUNK_TOKEN_SIZE = 500
 CHUNK_OVERLAP = 50
 UPLOAD_DIR = "uploads"
 
 _enc = tiktoken.get_encoding("cl100k_base")
+
+
+def _extract_text(contents: bytes) -> str:
+    """Extract full text from PDF bytes. Raises ValueError for corrupt or empty PDFs."""
+    try:
+        reader = PdfReader(io.BytesIO(contents))
+    except PdfReadError as e:
+        raise ValueError(f"Corrupt or unreadable PDF: {e}") from e
+
+    if len(reader.pages) == 0:
+        raise ValueError("PDF has no pages")
+
+    pages_text = [page.extract_text() or "" for page in reader.pages]
+    full_text = "\n".join(pages_text).strip()
+
+    if not full_text:
+        raise ValueError("PDF contains no extractable text (may be scanned or image-only)")
+
+    return full_text
 
 
 def _split_text(text: str) -> list[str]:
@@ -32,23 +52,28 @@ async def process_pdf(
     user_id: int,
     db: AsyncSession,
 ) -> Document:
+    if not contents:
+        raise ValueError("Uploaded file is empty")
+
+    full_text = _extract_text(contents)
+    text_chunks = _split_text(full_text)
+
+    embeddings = await embed_texts(text_chunks)
+
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     safe_name = filename.replace("/", "_")
     storage_path = os.path.join(UPLOAD_DIR, f"{user_id}_{safe_name}")
     with open(storage_path, "wb") as f:
         f.write(contents)
 
-    reader = PdfReader(io.BytesIO(contents))
-    full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
-    text_chunks = _split_text(full_text)
-    embeddings = await embed_texts(text_chunks)
-
     doc = Document(owner_id=user_id, filename=filename, storage_path=storage_path)
     db.add(doc)
     await db.flush()
 
-    for i, (chunk_text, embedding) in enumerate(zip(text_chunks, embeddings)):
-        db.add(DocumentChunk(document_id=doc.id, chunk_index=i, content=chunk_text, embedding=embedding))
+    db.add_all([
+        DocumentChunk(document_id=doc.id, chunk_index=i, content=chunk_text, embedding=embedding)
+        for i, (chunk_text, embedding) in enumerate(zip(text_chunks, embeddings))
+    ])
 
     await db.commit()
     await db.refresh(doc)

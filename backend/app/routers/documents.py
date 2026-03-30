@@ -10,16 +10,31 @@ from app.services.pdf_processor import process_pdf
 router = APIRouter()
 
 
+def _is_pdf(file: UploadFile) -> bool:
+    if file.content_type == "application/pdf":
+        return True
+    # some clients send application/octet-stream — fall back to filename check
+    if file.content_type == "application/octet-stream" and (file.filename or "").lower().endswith(".pdf"):
+        return True
+    return False
+
+
 @router.post("/", response_model=DocumentOut, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     file: UploadFile,
     user_id: int = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    if file.content_type != "application/pdf":
+    if not _is_pdf(file):
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
     contents = await file.read()
-    document = await process_pdf(contents, file.filename or "upload.pdf", user_id, db)
+
+    try:
+        document = await process_pdf(contents, file.filename or "upload.pdf", user_id, db)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
     return document
 
 

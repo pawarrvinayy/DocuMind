@@ -7,7 +7,7 @@ alembic==1.13.1
 asyncpg==0.29.0
 pgvector==0.2.5
 openai==1.25.0
-pypdf2==3.0.1
+pypdf==4.2.0
 tiktoken==0.7.0
 python-multipart==0.0.9
 python-jose[cryptography]==3.3.0
