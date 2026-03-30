@@ -16,8 +16,8 @@ UPLOAD_DIR = "uploads"
 _enc = tiktoken.get_encoding("cl100k_base")
 
 
-def _extract_text(contents: bytes) -> str:
-    """Extract full text from PDF bytes. Raises ValueError for corrupt or empty PDFs."""
+def _extract_pages(contents: bytes) -> list[tuple[int, str]]:
+    """Return list of (1-indexed page_number, page_text). Raises ValueError on bad PDFs."""
     try:
         reader = PdfReader(io.BytesIO(contents))
     except PdfReadError as e:
@@ -26,23 +26,35 @@ def _extract_text(contents: bytes) -> str:
     if len(reader.pages) == 0:
         raise ValueError("PDF has no pages")
 
-    pages_text = [page.extract_text() or "" for page in reader.pages]
-    full_text = "\n".join(pages_text).strip()
+    pages = [(i + 1, page.extract_text() or "") for i, page in enumerate(reader.pages)]
 
-    if not full_text:
+    if not any(text.strip() for _, text in pages):
         raise ValueError("PDF contains no extractable text (may be scanned or image-only)")
 
-    return full_text
+    return pages
 
 
-def _split_text(text: str) -> list[str]:
-    tokens = _enc.encode(text)
-    chunks: list[str] = []
+def _split_pages_to_chunks(pages: list[tuple[int, str]]) -> list[tuple[str, int]]:
+    """
+    Sliding-window token chunking across all pages.
+    Returns list of (chunk_text, page_number) where page_number is where the chunk starts.
+    """
+    all_tokens: list[int] = []
+    token_pages: list[int] = []
+
+    for page_num, text in pages:
+        tokens = _enc.encode(text)
+        all_tokens.extend(tokens)
+        token_pages.extend([page_num] * len(tokens))
+
+    chunks: list[tuple[str, int]] = []
     start = 0
-    while start < len(tokens):
-        end = min(start + CHUNK_TOKEN_SIZE, len(tokens))
-        chunks.append(_enc.decode(tokens[start:end]))
+    while start < len(all_tokens):
+        end = min(start + CHUNK_TOKEN_SIZE, len(all_tokens))
+        chunk_text = _enc.decode(all_tokens[start:end])
+        chunks.append((chunk_text, token_pages[start]))
         start += CHUNK_TOKEN_SIZE - CHUNK_OVERLAP
+
     return chunks
 
 
@@ -55,10 +67,11 @@ async def process_pdf(
     if not contents:
         raise ValueError("Uploaded file is empty")
 
-    full_text = _extract_text(contents)
-    text_chunks = _split_text(full_text)
+    pages = _extract_pages(contents)
+    chunks = _split_pages_to_chunks(pages)
+    texts = [text for text, _ in chunks]
 
-    embeddings = await embed_texts(text_chunks)
+    embeddings = await embed_texts(texts)
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     safe_name = filename.replace("/", "_")
@@ -71,8 +84,14 @@ async def process_pdf(
     await db.flush()
 
     db.add_all([
-        DocumentChunk(document_id=doc.id, chunk_index=i, content=chunk_text, embedding=embedding)
-        for i, (chunk_text, embedding) in enumerate(zip(text_chunks, embeddings))
+        DocumentChunk(
+            document_id=doc.id,
+            chunk_index=i,
+            page_number=page_num,
+            content=chunk_text,
+            embedding=embedding,
+        )
+        for i, ((chunk_text, page_num), embedding) in enumerate(zip(chunks, embeddings))
     ])
 
     await db.commit()
